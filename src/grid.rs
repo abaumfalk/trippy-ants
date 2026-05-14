@@ -1,16 +1,11 @@
 //! The _backplane_ of the simulation which stores the pheromone levels for each cell in the grid.
 
-use std::mem;
-
 use rayon::{
     iter::{IndexedParallelIterator as _, ParallelIterator as _},
     slice::ParallelSliceMut as _,
 };
 
-use crate::{
-    Agent,
-    config::{Config, GridTopology, WorldConfig},
-};
+use crate::config::GridTopology;
 
 /// Contains the data for a single cell (pixel) in the grid.
 #[derive(Default, Clone, Copy)]
@@ -25,10 +20,10 @@ pub(crate) struct Cell {
 /// Data structure holding the cell values for each pixel in the grid.
 pub(crate) struct Grid {
     /// Width of the grid in cells/pixels.
-    width: usize,
+    width: u16,
 
     /// Height of the grid in cells/pixels.
-    height: usize,
+    height: u16,
 
     /// The actual cells/pixels in the grid.
     pub(crate) cells: Vec<Cell>,
@@ -41,11 +36,23 @@ pub(crate) struct Grid {
 
 impl Grid {
     /// Create a new grid with the given width and height in cells/pixels.
-    fn new(width: usize, height: usize, topology: GridTopology) -> Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the width or height is 0 or greater than 32767.
+    pub(crate) fn new(width: u16, height: u16, topology: GridTopology) -> Self {
+        assert!(width > 0, "width must be greater than 0");
+        assert!(height > 0, "height must be greater than 0");
+        assert!(width <= 0x7FFF, "width must be less than or equal to 32767");
+        assert!(
+            height <= 0x7FFF,
+            "height must be less than or equal to 32767"
+        );
+
         Self {
             width,
             height,
-            cells: vec![Cell::default(); width * height],
+            cells: vec![Cell::default(); usize::from(width) * usize::from(height)],
             topology,
         }
     }
@@ -54,59 +61,77 @@ impl Grid {
     ///
     /// The topology will determine whether an out-of-bounds index shall be wrapped around or
     /// clamped to the edge.
-    fn map_row(&self, y: i32) -> usize {
-        let height = self.height as i32;
-        match self.topology {
+    fn map_row(&self, y: i16) -> u16 {
+        let height = self.height.cast_signed();
+        let y = match self.topology {
             GridTopology::Torus => {
                 if (0..height).contains(&y) {
-                    y as usize
+                    y
                 } else {
-                    y.rem_euclid(height) as usize
+                    y.rem_euclid(height)
                 }
             }
-            GridTopology::Plane => y.clamp(0, height - 1) as usize,
-        }
+            GridTopology::Plane => y.clamp(0, height - 1),
+        };
+        y.cast_unsigned()
     }
 
     /// Map a column index to the actual column index in the grid.
     ///
     /// The topology will determine whether an out-of-bounds index shall be wrapped around or
     /// clamped to the edge.
-    fn map_col(&self, x: i32) -> usize {
-        let width = self.width as i32;
-        match self.topology {
+    fn map_col(&self, x: i16) -> u16 {
+        let width = self.width.cast_signed();
+        let x = match self.topology {
             GridTopology::Torus => {
                 if (0..width).contains(&x) {
-                    x as usize
+                    x
                 } else {
-                    x.rem_euclid(width) as usize
+                    x.rem_euclid(width)
                 }
             }
-            GridTopology::Plane => x.clamp(0, width - 1) as usize,
-        }
+            GridTopology::Plane => x.clamp(0, width - 1),
+        };
+        x.cast_unsigned()
     }
 
     /// Get a row of cells from the grid.
-    ///
-    /// Out-of-bounds indices will be handled according to the topology.
-    pub(crate) fn row(&self, y: i32) -> &[Cell] {
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "`map_row` ensures that the index is in bounds"
-        )]
-        &self.cells[self.map_row(y) * self.width..][..self.width]
+    pub(crate) fn row(&self, y: impl Into<usize>) -> Option<&[Cell]> {
+        let width = usize::from(self.width);
+        let offset = y.into() * width;
+        self.cells.get(offset..offset + width)
     }
 
     /// Get a mutable row of cells from the grid.
-    ///
-    /// Out-of-bounds indices will be handled according to the topology.
-    fn row_mut(&mut self, y: i32) -> &mut [Cell] {
-        let mapped_row = self.map_row(y);
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "`map_row` ensures that the index is in bounds"
-        )]
-        &mut self.cells[mapped_row * self.width..][..self.width]
+    pub(crate) fn row_mut(&mut self, y: impl Into<usize>) -> Option<&mut [Cell]> {
+        let width = usize::from(self.width);
+        let offset = y.into() * width;
+        self.cells.get_mut(offset..offset + width)
+    }
+
+    /// Get an iterator over the rows of cells in the grid.
+    pub(crate) fn rows_mut(&mut self) -> impl Iterator<Item = &mut [Cell]> {
+        self.cells.chunks_exact_mut(usize::from(self.width))
+    }
+
+    /// Get the first row of cells in the grid as mutable.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "unreachable due to constructor validation"
+    )]
+    pub(crate) fn first_row_mut(&mut self) -> &mut [Cell] {
+        self.row_mut(0_usize)
+            .expect("unreachable: no first row exists")
+    }
+
+    /// Get the last row of cells in the grid as mutable.
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "unreachable due to constructor validation"
+    )]
+    pub(crate) fn last_row_mut(&mut self) -> &mut [Cell] {
+        self.row_mut(self.height - 1)
+            .expect("unreachable: no last row exists")
     }
 
     /// Get the cell index for the given x and y coordinates.
@@ -115,10 +140,10 @@ impl Grid {
     ///
     /// The returned index is guaranteed to be within the bounds of the grid.
     fn index(&self, x: f32, y: f32) -> usize {
-        // FIXME this should use the mapping methods as well
-        let x = (x.round() as usize).clamp(0, self.width - 1);
-        let y = (y.round() as usize).clamp(0, self.height - 1);
-        y * self.width + x
+        #[expect(clippy::cast_possible_truncation, reason = "truncation is acceptable")]
+        let (x16, y16) = (x.round() as i16, y.round() as i16);
+        let (mapped_x, mapped_y) = (self.map_col(x16), self.map_row(y16));
+        usize::from(mapped_y) * usize::from(self.width) + usize::from(mapped_x)
     }
 
     /// Get the cell at the given x and y coordinates.
@@ -138,7 +163,7 @@ impl Grid {
     ///
     /// Out-of-bounds indices will be handled according to the topology.
     // TODO implement interpolation
-    fn cell_mut(&mut self, x: f32, y: f32) -> &mut Cell {
+    pub(crate) fn cell_mut(&mut self, x: f32, y: f32) -> &mut Cell {
         let index = self.index(x, y);
         #[expect(
             clippy::indexing_slicing,
@@ -150,25 +175,30 @@ impl Grid {
     /// Update the grid by blurring the pheromone levels of the read buffer.
     ///
     /// The decay factor will determine how much the pheromone levels will be reduced.
-    fn blur(&mut self, read_buffer: &Self, decay_factor: f32) {
+    #[expect(
+        clippy::unwrap_used,
+        clippy::missing_panics_doc,
+        reason = "unreachable: coordinates are guaranteed to be in bounds"
+    )]
+    pub(crate) fn blur(&mut self, read_buffer: &Self, decay_factor: f32) {
         self.cells
-            .par_chunks_exact_mut(self.width)
+            .par_chunks_exact_mut(usize::from(self.width))
             .enumerate()
             .for_each(|(y, write_row)| {
-                // 5 rows around the current row
-                let y = y as i32;
+                // 3 rows around the current row
+                let y16 = i16::try_from(y).unwrap();
                 let row = [
-                    read_buffer.row(y - 1),
-                    read_buffer.row(y),
-                    read_buffer.row(y + 1),
+                    read_buffer.row(read_buffer.map_row(y16 - 1)).unwrap(),
+                    read_buffer.row(y).unwrap(),
+                    read_buffer.row(read_buffer.map_row(y16 + 1)).unwrap(),
                 ];
                 for (x, write_cell) in write_row.iter_mut().enumerate() {
                     // column indices for the 3 columns around x
-                    let x = x as i32;
+                    let x16 = i16::try_from(x).unwrap();
                     let col = [
-                        read_buffer.map_col(x - 1),
-                        read_buffer.map_col(x),
-                        read_buffer.map_col(x + 1),
+                        usize::from(read_buffer.map_col(x16 - 1)),
+                        x,
+                        usize::from(read_buffer.map_col(x16 + 1)),
                     ];
 
                     #[expect(
@@ -203,111 +233,5 @@ impl Grid {
                     write_cell.level = if level.is_normal() { level } else { 0.0 };
                 }
             });
-    }
-}
-
-/// The current run-time state of the entire simulation.
-pub(crate) struct Simulation {
-    /// Width of the grid in cells/pixels.
-    pub(crate) width: usize,
-
-    /// Height of the grid in cells/pixels.
-    pub(crate) height: usize,
-
-    /// The buffer that is read from in the current frame.
-    ///
-    /// This will be swapped with the write buffer after each frame.
-    pub(crate) read_buffer: Grid,
-
-    /// The buffer that is written to in the current frame.
-    ///
-    /// This will be swapped with the read buffer after each frame.
-    pub(crate) write_buffer: Grid,
-
-    /// The value to use for the outermost pixel rows and columns.
-    ///
-    /// This will repel or attract the ants from the edges of the grid.
-    /// A value of `None` means that the edges have no special effect.
-    pub(crate) wall_value: Option<f32>,
-
-    /// The decay factor to use for the pheromone levels.
-    pub(crate) decay_factor: f32,
-}
-
-impl Simulation {
-    /// Create a new simulation with the given width and height in cells/pixels.
-    pub(crate) fn new(width: usize, height: usize, config: &Config) -> Self {
-        let WorldConfig {
-            wall_value,
-            topology,
-            decay_factor,
-        } = config.world;
-
-        Self {
-            width,
-            height,
-            read_buffer: Grid::new(width, height, topology),
-            write_buffer: Grid::new(width, height, topology),
-            wall_value,
-            decay_factor,
-        }
-    }
-
-    /// Update the simulation by blurring the pheromone levels of the read buffer and writing them to the write buffer.
-    pub(crate) fn blur(&mut self) {
-        self.write_buffer.blur(&self.read_buffer, self.decay_factor);
-    }
-
-    /// Update the simulation by adding the pheromone levels of the agents to the write buffer.
-    ///
-    /// This will also apply the wall value to the outermost pixel rows and columns.
-    pub(crate) fn update(&mut self, agents: &[Agent]) {
-        for agent in agents {
-            let level = &mut self.write_buffer.cell_mut(agent.x, agent.y).level;
-            *level = (*level + agent.value).clamp(-1.0, 1.0);
-        }
-
-        // repulse from or attract to walls
-        if let Some(value) = self.wall_value {
-            // top wall
-            self.write_buffer.row_mut(0).iter_mut().for_each(|cell| {
-                cell.level = value;
-            });
-
-            // bottom wall
-            self.write_buffer
-                .row_mut(self.height as i32 - 1)
-                .iter_mut()
-                .for_each(|cell| {
-                    cell.level = value;
-                });
-
-            // sides
-            for y in 0..self.height {
-                let row = self.write_buffer.row_mut(y as i32);
-                if let Some(first) = row.first_mut() {
-                    // left wall
-                    first.level = value;
-                }
-                if let Some(last) = row.last_mut() {
-                    // right wall
-                    last.level = value;
-                }
-            }
-        }
-
-        // let row = (self.height / 2 - 1) * self.width;
-        // for x in 0..self.width {
-        //     // Hot coals + noise along the base.
-        //     let bump = rand_u32(rng) % 96;
-        //     self.cells[row + x].level = (220.0 - bump as f32) / 255.0;
-        // }
-    }
-
-    /// Swap the read and write buffers.
-    ///
-    /// This will be called after each frame to prepare for the next frame.
-    pub(crate) const fn swap_buffers(&mut self) {
-        mem::swap(&mut self.read_buffer, &mut self.write_buffer);
     }
 }

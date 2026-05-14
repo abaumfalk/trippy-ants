@@ -2,6 +2,7 @@
     "cSpell.words": [
         "ascii",
         "blit",
+        "eopkg",
         "euclid",
         "hypot",
         "idents",
@@ -9,6 +10,7 @@
         "Lague's",
         "minifb",
         "overcaptures",
+        "pacman",
         "pathbuf",
         "peekable",
         "recip",

@@ -25,15 +25,19 @@ pub(crate) struct Frame {
 
 impl Frame {
     /// Create a new frame with the given width and height in pixels.
-    pub(crate) fn new(width: usize, height: usize) -> Self {
+    pub(crate) fn new(width: u16, height: u16) -> Self {
         Self {
-            width,
-            height,
-            pixels: vec![0; width * height],
+            width: usize::from(width),
+            height: usize::from(height),
+            pixels: vec![0; usize::from(width) * usize::from(height)],
         }
     }
 
     /// Update the frame with the current state of the simulation by colorizing the stored cell-values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the frame and grid sizes do not match.
     pub(crate) fn update<const RESOLUTION: usize>(
         &mut self,
         grid: &Grid,
@@ -43,12 +47,8 @@ impl Frame {
             .par_chunks_exact_mut(self.width)
             .enumerate()
             .for_each(|(y, pixels)| {
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_possible_wrap,
-                    reason = "image dimensions are small enough"
-                )]
-                for (pixel, cell) in pixels.iter_mut().zip(grid.row(y as i32)) {
+                let row = grid.row(y).expect("mismatch between frame and grid size");
+                for (pixel, cell) in pixels.iter_mut().zip(row) {
                     *pixel = palette.get_color(cell.level);
                 }
             });

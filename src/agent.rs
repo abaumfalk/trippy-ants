@@ -7,8 +7,8 @@ use std::{
 
 use crate::{
     config::{AgentConfig, Config, WallBounceReaction},
-    grid::Simulation,
     random::{rand_f32, rand_symmetric_f32, rand_u32},
+    simulation::Simulation,
 };
 
 /// Current runtime state of an ant that moves around the grid and leaves pheromones.
@@ -51,7 +51,7 @@ pub(crate) struct Agent {
 
 impl Agent {
     /// Create a new agent with the given configuration.
-    pub(crate) fn new(config: &Config, width: usize, height: usize, rng: &mut u32) -> Self {
+    pub(crate) fn new(config: &Config, width: u16, height: u16, rng: &mut u32) -> Self {
         #![expect(
             clippy::suboptimal_flops,
             reason = "this would impair readability for code that is not performance critical"
@@ -73,8 +73,7 @@ impl Agent {
         let mut rng = rand_u32(rng) ^ rand_u32(rng);
         let mut random = || rand_f32(&mut rng);
 
-        #[expect(clippy::cast_precision_loss, reason = "dimensions are small enough")]
-        let (width, height) = (width as f32, height as f32);
+        let (width, height) = (f32::from(width), f32::from(height));
 
         let x = random() * width;
         let y = random() * height;
@@ -140,126 +139,132 @@ impl Agent {
         let new_x = cos.mul_add(self.speed * scale, self.x);
         let new_y = sin.mul_add(self.speed * scale, self.y);
 
-        #[expect(clippy::cast_precision_loss, reason = "dimensions are small enough")]
-        let (width, height) = (simulation.width as f32, simulation.height as f32);
+        let (width, height) = (f32::from(simulation.width), f32::from(simulation.height));
 
-        let x_rating = if new_x < 0.0 {
-            Ordering::Less
-        } else if new_x > width {
-            Ordering::Greater
-        } else {
-            Ordering::Equal
+        let rate_range = |value: f32, min: f32, max: f32| {
+            if value < min {
+                Ordering::Less
+            } else if value > max {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
         };
-
-        let y_rating = if new_y < 0.0 {
-            Ordering::Less
-        } else if new_y > height {
-            Ordering::Greater
-        } else {
-            Ordering::Equal
-        };
+        let x_rating = rate_range(new_x, 0.0, width);
+        let y_rating = rate_range(new_y, 0.0, height);
 
         let hit_wall = !matches!((x_rating, y_rating), (Ordering::Equal, Ordering::Equal));
-
         if hit_wall {
             if self.wall_bounce_flip_value {
                 self.value = -self.value;
             }
-
-            match self.wall_bounce_reaction {
-                WallBounceReaction::Center => (self.x, self.y) = (width / 2.0, height / 2.0),
-                WallBounceReaction::Random => {
-                    self.x = rand_f32(&mut self.rng) * width;
-                    self.y = rand_f32(&mut self.rng) * height;
-                }
-                WallBounceReaction::WrapAround => {
-                    self.x = match x_rating {
-                        Ordering::Less => new_x + width,
-                        Ordering::Greater => new_x - width,
-                        Ordering::Equal => new_x,
-                    };
-                    self.y = match y_rating {
-                        Ordering::Less => new_y + height,
-                        Ordering::Greater => new_y - height,
-                        Ordering::Equal => new_y,
-                    };
-                }
-                WallBounceReaction::Clip => {
-                    self.x = match x_rating {
-                        Ordering::Less => 0.0,
-                        Ordering::Greater => width,
-                        Ordering::Equal => new_x,
-                    };
-                    self.y = match y_rating {
-                        Ordering::Less => 0.0,
-                        Ordering::Greater => height,
-                        Ordering::Equal => new_y,
-                    };
-                }
-                WallBounceReaction::FaceAway(spread) => {
-                    let mut new_direction = |normal: f32| {
-                        normal.mul_add(TAU, rand_symmetric_f32(&mut self.rng) * spread)
-                    };
-
-                    match x_rating {
-                        Ordering::Less => {
-                            self.direction = new_direction(0.0);
-                            self.x = 0.0;
-                        }
-                        Ordering::Greater => {
-                            self.direction = new_direction(0.5);
-                            self.x = width;
-                        }
-                        Ordering::Equal => {
-                            self.x = new_x;
-                        }
-                    }
-                    match y_rating {
-                        Ordering::Less => {
-                            self.direction = new_direction(0.25);
-                            self.y = 0.0;
-                        }
-                        Ordering::Greater => {
-                            self.direction = new_direction(0.75);
-                            self.y = height;
-                        }
-                        Ordering::Equal => {
-                            self.y = new_y;
-                        }
-                    }
-                }
-                WallBounceReaction::BounceOff => {
-                    match x_rating {
-                        Ordering::Less => {
-                            self.direction = 0.25_f32.mul_add(TAU, -self.direction);
-                            self.x = 0.0;
-                        }
-                        Ordering::Greater => {
-                            self.direction = 0.75_f32.mul_add(TAU, -self.direction);
-                            self.x = width;
-                        }
-                        Ordering::Equal => {
-                            self.x = new_x;
-                        }
-                    }
-                    match y_rating {
-                        Ordering::Less => {
-                            self.direction = 0.50_f32.mul_add(TAU, -self.direction);
-                            self.y = 0.0;
-                        }
-                        Ordering::Greater => {
-                            self.direction = 0.0_f32.mul_add(TAU, -self.direction);
-                            self.y = height;
-                        }
-                        Ordering::Equal => {
-                            self.y = new_y;
-                        }
-                    }
-                }
-            }
+            self.wall_bounce(new_x, new_y, width, height, x_rating, y_rating);
         } else {
             self.x = new_x;
             self.y = new_y;
+        }
+    }
+
+    /// Update position and maybe direction of the agent when it hits a wall.
+    fn wall_bounce(
+        &mut self,
+        new_x: f32,
+        new_y: f32,
+        width: f32,
+        height: f32,
+        x_rating: Ordering,
+        y_rating: Ordering,
+    ) {
+        match self.wall_bounce_reaction {
+            WallBounceReaction::Center => (self.x, self.y) = (width / 2.0, height / 2.0),
+            WallBounceReaction::Random => {
+                self.x = rand_f32(&mut self.rng) * width;
+                self.y = rand_f32(&mut self.rng) * height;
+            }
+            WallBounceReaction::WrapAround => {
+                self.x = match x_rating {
+                    Ordering::Less => new_x + width,
+                    Ordering::Greater => new_x - width,
+                    Ordering::Equal => new_x,
+                };
+                self.y = match y_rating {
+                    Ordering::Less => new_y + height,
+                    Ordering::Greater => new_y - height,
+                    Ordering::Equal => new_y,
+                };
+            }
+            WallBounceReaction::Clip => {
+                self.x = match x_rating {
+                    Ordering::Less => 0.0,
+                    Ordering::Greater => width,
+                    Ordering::Equal => new_x,
+                };
+                self.y = match y_rating {
+                    Ordering::Less => 0.0,
+                    Ordering::Greater => height,
+                    Ordering::Equal => new_y,
+                };
+            }
+            WallBounceReaction::FaceAway(spread) => {
+                let mut new_direction =
+                    |normal: f32| normal.mul_add(TAU, rand_symmetric_f32(&mut self.rng) * spread);
+
+                match x_rating {
+                    Ordering::Less => {
+                        self.direction = new_direction(0.0);
+                        self.x = 0.0;
+                    }
+                    Ordering::Greater => {
+                        self.direction = new_direction(0.5);
+                        self.x = width;
+                    }
+                    Ordering::Equal => {
+                        self.x = new_x;
+                    }
+                }
+                match y_rating {
+                    Ordering::Less => {
+                        self.direction = new_direction(0.25);
+                        self.y = 0.0;
+                    }
+                    Ordering::Greater => {
+                        self.direction = new_direction(0.75);
+                        self.y = height;
+                    }
+                    Ordering::Equal => {
+                        self.y = new_y;
+                    }
+                }
+            }
+            WallBounceReaction::BounceOff => {
+                // FIXME I think these directions are wrong
+                match x_rating {
+                    Ordering::Less => {
+                        self.direction = 0.25_f32.mul_add(TAU, -self.direction);
+                        self.x = 0.0;
+                    }
+                    Ordering::Greater => {
+                        self.direction = 0.75_f32.mul_add(TAU, -self.direction);
+                        self.x = width;
+                    }
+                    Ordering::Equal => {
+                        self.x = new_x;
+                    }
+                }
+                match y_rating {
+                    Ordering::Less => {
+                        self.direction = 0.50_f32.mul_add(TAU, -self.direction);
+                        self.y = 0.0;
+                    }
+                    Ordering::Greater => {
+                        self.direction = 0.0_f32.mul_add(TAU, -self.direction);
+                        self.y = height;
+                    }
+                    Ordering::Equal => {
+                        self.y = new_y;
+                    }
+                }
+            }
         }
     }
 

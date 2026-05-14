@@ -21,6 +21,7 @@ mod frame;
 mod grid;
 mod palette;
 mod random;
+mod simulation;
 
 use chrono::Local;
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
@@ -32,14 +33,14 @@ use std::{
 };
 
 use crate::{
-    agent::Agent, config::ACTIVE_CONFIG, frame::Frame, grid::Simulation, palette::Palette,
+    agent::Agent, config::ACTIVE_CONFIG, frame::Frame, palette::Palette, simulation::Simulation,
 };
 
 /// Width of the simulation and frame buffer in pixels.
-const WIDTH: usize = 1920;
+const WIDTH: u16 = 1920;
 
 /// Height of the simulation and frame buffer in pixels.
-const HEIGHT: usize = 1080;
+const HEIGHT: u16 = 1080;
 
 /// Maximum framerate for displaying updates.
 /// This saves on CPU for the actual computation.
@@ -58,8 +59,8 @@ fn main() {
 
     let mut window = Window::new(
         "Trippy Ants (Space: save screenshot, Esc: quit)",
-        WIDTH,
-        HEIGHT,
+        usize::from(WIDTH),
+        usize::from(HEIGHT),
         WindowOptions {
             resize: false,
             scale: minifb::Scale::X1,
