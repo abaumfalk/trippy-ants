@@ -190,7 +190,10 @@ impl Agent {
         y_rating: Ordering,
     ) {
         match self.wall_bounce_reaction {
-            WallBounceReaction::Center => (self.x, self.y) = (width / 2.0, height / 2.0),
+            WallBounceReaction::Center => {
+                self.direction = rand_f32(&mut self.rng) * TAU;
+                (self.x, self.y) = (width / 2.0, height / 2.0);
+            }
             WallBounceReaction::Random => {
                 self.x = rand_f32(&mut self.rng) * width;
                 self.y = rand_f32(&mut self.rng) * height;

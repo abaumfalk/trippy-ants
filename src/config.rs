@@ -120,7 +120,7 @@ pub(crate) struct AgentConfig {
 /// Determines what happens when the ant hits a wall (i.e. tries to leave the window).
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum WallBounceReaction {
-    /// The ant will respawn at the center of the grid.
+    /// The ant will respawn at the center of the grid and face a random direction.
     Center,
 
     /// The ant will respawn at a random position on the grid.
