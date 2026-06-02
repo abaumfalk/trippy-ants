@@ -241,14 +241,13 @@ impl Agent {
                 }
             }
             WallBounceReaction::BounceOff => {
-                // FIXME I think these directions are wrong
                 match x_rating {
                     Ordering::Less => {
-                        self.direction = 0.25_f32.mul_add(TAU, -self.direction);
+                        self.direction = PI - self.direction;
                         self.x = 0.0;
                     }
                     Ordering::Greater => {
-                        self.direction = 0.75_f32.mul_add(TAU, -self.direction);
+                        self.direction = PI - self.direction;
                         self.x = width;
                     }
                     Ordering::Equal => {
@@ -257,11 +256,11 @@ impl Agent {
                 }
                 match y_rating {
                     Ordering::Less => {
-                        self.direction = 0.50_f32.mul_add(TAU, -self.direction);
+                        self.direction = -self.direction;
                         self.y = 0.0;
                     }
                     Ordering::Greater => {
-                        self.direction = 0.0_f32.mul_add(TAU, -self.direction);
+                        self.direction = -self.direction;
                         self.y = height;
                     }
                     Ordering::Equal => {
