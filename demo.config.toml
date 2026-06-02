@@ -1,6 +1,6 @@
 [world]
-topology = "Plane"
-decay_factor = 0.99
+topology = "Torus"
+decay_factor = 0.96
 
 [agent]
 count = 20000
@@ -8,11 +8,13 @@ sensor_distance = 20.0
 sensor_width = 0.6
 anti_percentage = 0.0
 anti_speed_factor = 0.2
-wall_bounce_flip_value = true
-wall_bounce_reaction = "Clip"
+wall_bounce_flip_value = false
+wall_bounce_reaction = "WrapAround"
 value = [0.6, 1.2]
 speed = [1.0, 1.7]
+jitter = 0.2
+sensor_strength = 2.0
 
 [colors]
-normal = [0.0, -1.0, -1.0]
-anti = [-0.6, 0.0, -0.8]
+normal = [0.0, 0.7, 0.3]
+anti = [0.0, -1.0, -0.6]
