@@ -47,6 +47,12 @@ pub(crate) struct Agent {
 
     /// What to do, if the agent hits a wall.
     wall_bounce_reaction: WallBounceReaction,
+
+    /// The amount of jitter (randomness) in the direction of the agent.
+    jitter: f32,
+
+    /// Factor of how much the sensor's value affects the direction of the agent.
+    sensor_strength: f32,
 }
 
 impl Agent {
@@ -67,6 +73,8 @@ impl Agent {
             anti_speed_factor,
             wall_bounce_flip_value,
             wall_bounce_reaction,
+            jitter,
+            sensor_strength,
         } = config.agent;
 
         // compute an individual seed
@@ -117,6 +125,8 @@ impl Agent {
             anti_speed_factor,
             wall_bounce_flip_value,
             wall_bounce_reaction,
+            jitter,
+            sensor_strength,
         }
     }
 
@@ -299,7 +309,7 @@ impl Agent {
 
         let delta = angle_sum;
         let jitter = rand_symmetric_f32(&mut self.rng) * self.sensor_width;
-        self.direction += delta * 0.5 + jitter * 0.3;
+        self.direction += delta * self.sensor_strength + jitter * self.jitter;
     }
 
     /// Update the agent's configuration.
@@ -316,12 +326,16 @@ impl Agent {
             ref value,
             ref speed,
             anti_percentage: _, // used for creation of new agents
+            jitter,
+            sensor_strength,
         } = *config;
         self.sensor_width = sensor_width;
         self.sensor_distance = sensor_distance;
         self.anti_speed_factor = anti_speed_factor;
         self.wall_bounce_flip_value = wall_bounce_flip_value;
         self.wall_bounce_reaction = wall_bounce_reaction;
+        self.jitter = jitter;
+        self.sensor_strength = sensor_strength;
 
         let mut speed_seed = index ^ 0x1234_5678;
         self.speed = speed.start + rand_f32(&mut speed_seed) * (speed.end - speed.start);

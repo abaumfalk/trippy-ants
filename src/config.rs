@@ -27,6 +27,8 @@ pub(crate) const DEFAULT_CONFIG: Config = Config {
         anti_speed_factor: 0.1,
         wall_bounce_flip_value: true,
         wall_bounce_reaction: WallBounceReaction::Center,
+        jitter: 0.3,
+        sensor_strength: 0.5,
     },
     colors: ColorConfig {
         normal: [1.0, -1.0, -0.3],
@@ -107,6 +109,12 @@ pub(crate) struct AgentConfig {
 
     /// Determines what happens when the ant hits a wall.
     pub(crate) wall_bounce_reaction: WallBounceReaction,
+
+    /// The amount of jitter (randomness) in the direction of the agent.
+    pub(crate) jitter: f32,
+
+    /// Factor of how much the sensor's value affects the direction of the agent.
+    pub(crate) sensor_strength: f32,
 }
 
 /// Determines what happens when the ant hits a wall (i.e. tries to leave the window).
