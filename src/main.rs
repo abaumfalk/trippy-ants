@@ -18,7 +18,7 @@ mod simulation;
 
 use chrono::Local;
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
-use rayon::iter::{IntoParallelRefMutIterator as _, ParallelIterator as _};
+
 use std::{
     cmp::Ordering,
     collections::VecDeque,
@@ -117,9 +117,29 @@ fn main() -> ExitCode {
             frame.update_window(&mut window);
             frame_timeout = Instant::now();
         }
-        agents.par_iter_mut().for_each(|agent| {
-            agent.update(&simulation);
-        });
+        let total_agents = agents.len();
+        if total_agents > 0 {
+            let sim_ref = &simulation;
+            let mut remaining_agents = agents.as_mut_slice();
+            rayon::scope(|scope| {
+                let num_workers = rayon::current_num_threads();
+                let agents_per_worker = total_agents / num_workers;
+                let remainder = total_agents % num_workers;
+                for i in 0..num_workers {
+                    let agents_for_this_worker = agents_per_worker + usize::from(i < remainder);
+                    if agents_for_this_worker == 0 {
+                        continue;
+                    }
+                    let (chunk, rest) = remaining_agents.split_at_mut(agents_for_this_worker);
+                    remaining_agents = rest;
+                    scope.spawn(move |_| {
+                        for agent in chunk {
+                            agent.update(sim_ref);
+                        }
+                    });
+                }
+            });
+        }
         simulation.apply_agents(&agents);
         simulation.apply_bc();
 

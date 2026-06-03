@@ -2,8 +2,6 @@
 
 use std::{mem, sync::atomic::Ordering};
 
-use rayon::iter::{IntoParallelRefIterator as _, ParallelIterator as _};
-
 use crate::{agent::Agent, config::WorldConfig, grid::Grid};
 
 /// The current run-time state of the entire simulation.
@@ -60,32 +58,61 @@ impl Simulation {
 
     /// Update the simulation by adding the pheromone levels of the agents to the write buffer.
     pub(crate) fn apply_agents(&self, agents: &[Agent]) {
-        agents.par_iter().for_each(|agent| {
-            #[expect(unsafe_code, reason = "required to access the cells atomically in some cases but non-atomically in others")]
-            // Safety: All atomic work on the write buffer happens within this
-            // `rayon::scope()`, which blocks until spawned tasks complete, acting as a
-            // synchronization point. Inside the scope, we only perform atomic operations
-            // on the cell levels. After `scope()` returns, no concurrent accesses remain,
-            // so subsequent non-atomic access is safe.
-            let atomic_level =
-                unsafe { self.write_buffer.atomic_cell_level(agent.x, agent.y) };
+        let total_agents = agents.len();
 
-            let mut level = atomic_level.load(Ordering::Relaxed);
+        if total_agents == 0 {
+            return;
+        }
 
-            loop {
-                let new_level = (f32::from_bits(level) + agent.value)
-                    .clamp(-1.0, 1.0)
-                    .to_bits();
+        rayon::scope(|scope| {
+            let mut remaining_agents = agents;
 
-                match atomic_level.compare_exchange_weak(
-                    level,
-                    new_level,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => break,
-                    Err(old_level) => level = old_level,
+            let num_workers = rayon::current_num_threads();
+            let agents_per_worker = total_agents / num_workers;
+            let remainder = total_agents % num_workers;
+
+            for i in 0..num_workers {
+                // Distribute any remainder agents across the first few chunks
+                let agents_for_this_worker = agents_per_worker + usize::from(i < remainder);
+
+                if agents_for_this_worker == 0 {
+                    continue;
                 }
+
+                // Safely split the immutable slice
+                let (chunk, rest) = remaining_agents.split_at(agents_for_this_worker);
+                remaining_agents = rest;
+
+                scope.spawn(move |_| {
+                    for agent in chunk {
+                        #[expect(unsafe_code, reason = "required to access the cells atomically in some cases but non-atomically in others")]
+                        // Safety: All atomic work on the write buffer happens within this
+                        // `rayon::scope()`, which blocks until spawned tasks complete, acting as a
+                        // synchronization point. Inside the scope, we only perform atomic operations
+                        // on the cell levels. After `scope()` returns, no concurrent accesses remain,
+                        // so subsequent non-atomic access is safe.
+                        let atomic_level =
+                            unsafe { self.write_buffer.atomic_cell_level(agent.x, agent.y) };
+
+                        let mut level = atomic_level.load(Ordering::Relaxed);
+
+                        loop {
+                            let new_level = (f32::from_bits(level) + agent.value)
+                                .clamp(-1.0, 1.0)
+                                .to_bits();
+
+                            match atomic_level.compare_exchange_weak(
+                                level,
+                                new_level,
+                                Ordering::Relaxed,
+                                Ordering::Relaxed,
+                            ) {
+                                Ok(_) => break,
+                                Err(old_level) => level = old_level,
+                            }
+                        }
+                    }
+                });
             }
         });
     }
