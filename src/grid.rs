@@ -1,10 +1,11 @@
 //! The _backplane_ of the simulation which stores the pheromone levels for each cell in the grid.
 
+use std::slice;
+
 use rayon::{
     iter::{IndexedParallelIterator as _, ParallelIterator as _},
     slice::ParallelSliceMut as _,
 };
-use std::slice;
 
 use crate::config::GridTopology;
 
@@ -61,12 +62,14 @@ impl Grid {
             i16::MAX
         );
         assert!(
-            height <= 0x7FFF,
-            "height must be less than or equal to 32767"
+            i16::try_from(height).is_ok(),
+            "height must be less than or equal to {}",
+            i16::MAX
         );
 
         let total_cells = usize::from(width) * usize::from(height);
         let num_blocks = total_cells / CellBlock::NUM_CELLS;
+
         let blocks = vec![CellBlock([Cell::default(); CellBlock::NUM_CELLS]); num_blocks];
 
         Self {
@@ -146,9 +149,12 @@ impl Grid {
         if y >= self.height as usize {
             return None;
         }
+
+        // Calculate the slice of blocks that represent this row
         let blocks_per_row = self.width as usize / CellBlock::NUM_CELLS;
         let start = y * blocks_per_row;
         let end = start + blocks_per_row;
+
         let block_slice = self.blocks.get(start..end)?;
         // Safety: each CellBlock has the same layout as `[Cell; CellBlock::NUM_CELLS]`
         unsafe {
@@ -166,9 +172,11 @@ impl Grid {
         if y >= self.height as usize {
             return None;
         }
+
         let blocks_per_row = self.width as usize / CellBlock::NUM_CELLS;
         let start = y * blocks_per_row;
         let end = start + blocks_per_row;
+
         let block_slice = self.blocks.get_mut(start..end)?;
         // Safety: each CellBlock has the same layout as `[Cell; CellBlock::NUM_CELLS]`
         unsafe {
@@ -243,67 +251,132 @@ impl Grid {
         &mut self.cells_mut()[index]
     }
 
-    /// Update the grid by blurring the pheromone levels of the read buffer.
+    /// Evaluates a 3x3 Gaussian filter kernel given three horizontal row segments.
     ///
-    /// The decay factor will determine how much the pheromone levels will be reduced.
+    /// filter kernel (weight sum = 16)
+    /// 1 2 1
+    /// 2 4 2
+    /// 1 2 1.
+    fn blur_kernel(top: [Cell; 3], mid: [Cell; 3], bot: [Cell; 3]) -> f32 {
+        let corners = top[0].level + top[2].level + bot[0].level + bot[2].level;
+        let sides = top[1].level + mid[0].level + bot[1].level + mid[2].level;
+        let center = mid[1].level;
+
+        // Sum up smallest values first for improved numerical stability
+        let halo = corners.mul_add(16.0_f32.recip(), sides * 8.0_f32.recip());
+        center.mul_add(4.0_f32.recip(), halo)
+    }
+
+    #[inline]
     #[expect(
-        clippy::unwrap_used,
-        clippy::missing_panics_doc,
-        reason = "unreachable: coordinates are guaranteed to be in bounds"
+        clippy::indexing_slicing,
+        clippy::missing_asserts_for_indexing,
+        reason = "the bounds are checked once beforehand"
     )]
+    /// # Panics
+    /// - if the grids don't match in dimensions
+    /// - if the grid is malformed
     pub(crate) fn blur(&mut self, read_buffer: &Self, decay_factor: f32) {
-        let width = usize::from(self.width);
+        let width = self.width as usize;
+        let height = self.height as usize;
+
+        // Ensure that the grids match
+        assert_eq!(
+            self.cells().len(),
+            read_buffer.cells().len(),
+            "incompatible Grid layout"
+        );
+        assert_eq!(self.height, read_buffer.height, "incompatible Grid height");
+        assert_eq!(self.width, read_buffer.width, "incompatible Grid width");
+        assert_eq!(self.width % 64, 0, "incompatible Grid width");
+
+        assert_eq!(self.cells().len(), width * height, "bad grid layout");
+        assert!(width >= 3 && height >= 3, "grid is too small");
+        assert!(
+            i16::try_from(width).is_ok() && i16::try_from(height).is_ok(),
+            "bad grid size"
+        );
+
+        // Process interior rows
+        #[expect(
+            clippy::cast_possible_wrap,
+            clippy::cast_possible_truncation,
+            reason = "checked beforehand"
+        )]
+        let x_right = read_buffer.map_col(width as i16) as usize;
+        let x_left = read_buffer.map_col(-1) as usize;
+
         self.cells_mut()
             .par_chunks_exact_mut(width)
             .enumerate()
+            .skip(1)
+            .take(height - 2)
             .for_each(|(y, write_row)| {
-                // 3 rows around the current row
-                let y16 = i16::try_from(y).unwrap();
-                let row = [
-                    read_buffer.row(read_buffer.map_row(y16 - 1)).unwrap(),
-                    read_buffer.row(y).unwrap(),
-                    read_buffer.row(read_buffer.map_row(y16 + 1)).unwrap(),
-                ];
-                for (x, write_cell) in write_row.iter_mut().enumerate() {
-                    // column indices for the 3 columns around x
-                    let x16 = i16::try_from(x).unwrap();
-                    let col = [
-                        usize::from(read_buffer.map_col(x16 - 1)),
-                        x,
-                        usize::from(read_buffer.map_col(x16 + 1)),
-                    ];
+                let (row_top, row_mid, row_bot) = (|| {
+                    Some((
+                        read_buffer.row(y - 1)?,
+                        read_buffer.row(y)?,
+                        read_buffer.row(y + 1)?,
+                    ))
+                })()
+                .expect("Failed to get row neighborhood");
 
-                    #[expect(
-                        clippy::indexing_slicing,
-                        reason = "all indices are either compile-time constants or are guaranteed to be in bounds by using the mapping methods"
-                    )]
-                    let cell = |x_index: usize, y_index: usize| row[y_index][col[x_index]].level;
+                // Left Boundary Cell
+                write_row[0].level = Self::blur_kernel(
+                    [row_top[x_left], row_top[0], row_top[1]],
+                    [row_mid[x_left], row_mid[0], row_mid[1]],
+                    [row_bot[x_left], row_bot[0], row_bot[1]],
+                ) * decay_factor;
 
-                    // filter kernel (weight sum = 16)
-                    // 1 2 1
-                    // 2 4 2
-                    // 1 2 1
+                let top_wins = row_top[..width].array_windows::<3>();
+                let mid_wins = row_mid[..width].array_windows::<3>();
+                let bot_wins = row_bot[..width].array_windows::<3>();
+                let out_slice = &mut write_row[1..width - 1];
 
-                    let value00 = cell(0, 0); // top left
-                    let value01 = cell(1, 0); // top center
-                    let value02 = cell(2, 0); // top right
-                    let value10 = cell(0, 1); // left center
-                    let value11 = cell(1, 1); // center
-                    let value12 = cell(2, 1); // right center
-                    let value20 = cell(0, 2); // bottom left
-                    let value21 = cell(1, 2); // bottom center
-                    let value22 = cell(2, 2); // bottom right
-
-                    // sum up smallest values first for improved numerical stability
-                    let corners = (value00 + value02 + value20 + value22) * 16.0_f32.recip();
-                    let sides = (value01 + value10 + value21 + value12) * 8.0_f32.recip();
-                    let center = value11 * 4.0_f32.recip();
-                    let sum = corners + sides + center;
-                    let level = sum * decay_factor;
-
-                    // avoid sub-normal numbers for performance reasons
-                    write_cell.level = if level.is_normal() { level } else { 0.0 };
+                for (((dst, top), mid), bot) in out_slice
+                    .iter_mut()
+                    .zip(top_wins)
+                    .zip(mid_wins)
+                    .zip(bot_wins)
+                {
+                    dst.level = Self::blur_kernel(*top, *mid, *bot) * decay_factor;
                 }
+
+                // Right Boundary Cell
+                write_row[width - 1].level = Self::blur_kernel(
+                    [row_top[width - 2], row_top[width - 1], row_top[x_right]],
+                    [row_mid[width - 2], row_mid[width - 1], row_mid[x_right]],
+                    [row_bot[width - 2], row_bot[width - 1], row_bot[x_right]],
+                ) * decay_factor;
             });
+
+        // Process Boundary Rows (y = 0 and y = height - 1)
+        for y in [0, height - 1] {
+            let y16 = i16::try_from(y).expect("invalid row index");
+            let (row_top, row_mid, row_bot) = (|| {
+                Some((
+                    read_buffer.row(read_buffer.map_row(y16 - 1) as usize)?,
+                    read_buffer.row(y)?,
+                    read_buffer.row(read_buffer.map_row(y16 + 1) as usize)?,
+                ))
+            })()
+            .expect("Failed to get boundary row neighborhood");
+
+            let write_row = &mut self.cells_mut()[y * width..(y + 1) * width];
+            for (x, dst) in write_row.iter_mut().enumerate() {
+                let x16 = i16::try_from(x).expect("invalid column index");
+                let cols = [
+                    read_buffer.map_col(x16 - 1) as usize,
+                    x,
+                    read_buffer.map_col(x16 + 1) as usize,
+                ];
+
+                dst.level = Self::blur_kernel(
+                    cols.map(|i| row_top[i]),
+                    cols.map(|i| row_mid[i]),
+                    cols.map(|i| row_bot[i]),
+                ) * decay_factor;
+            }
+        }
     }
 }
