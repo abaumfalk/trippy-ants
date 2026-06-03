@@ -120,7 +120,8 @@ fn main() -> ExitCode {
         agents.par_iter_mut().for_each(|agent| {
             agent.update(&simulation);
         });
-        simulation.update(&agents);
+        simulation.apply_agents(&agents);
+        simulation.apply_bc();
 
         if window.is_key_pressed(Key::Space, KeyRepeat::No) {
             let filename = format!(

@@ -1,6 +1,8 @@
 //! The current run-time state of the entire simulation.
 
-use std::mem;
+use std::{mem, sync::atomic::Ordering};
+
+use rayon::iter::{IntoParallelRefIterator as _, ParallelIterator as _};
 
 use crate::{agent::Agent, config::WorldConfig, grid::Grid};
 
@@ -57,14 +59,39 @@ impl Simulation {
     }
 
     /// Update the simulation by adding the pheromone levels of the agents to the write buffer.
-    ///
-    /// This will also apply the wall value to the outermost pixel rows and columns.
-    pub(crate) fn update(&mut self, agents: &[Agent]) {
-        for agent in agents {
-            let level = &mut self.write_buffer.cell_mut(agent.x, agent.y).level;
-            *level = (*level + agent.value).clamp(-1.0, 1.0);
-        }
+    pub(crate) fn apply_agents(&self, agents: &[Agent]) {
+        agents.par_iter().for_each(|agent| {
+            #[expect(unsafe_code, reason = "required to access the cells atomically in some cases but non-atomically in others")]
+            // Safety: All atomic work on the write buffer happens within this
+            // `rayon::scope()`, which blocks until spawned tasks complete, acting as a
+            // synchronization point. Inside the scope, we only perform atomic operations
+            // on the cell levels. After `scope()` returns, no concurrent accesses remain,
+            // so subsequent non-atomic access is safe.
+            let atomic_level =
+                unsafe { self.write_buffer.atomic_cell_level(agent.x, agent.y) };
 
+            let mut level = atomic_level.load(Ordering::Relaxed);
+
+            loop {
+                let new_level = (f32::from_bits(level) + agent.value)
+                    .clamp(-1.0, 1.0)
+                    .to_bits();
+
+                match atomic_level.compare_exchange_weak(
+                    level,
+                    new_level,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(old_level) => level = old_level,
+                }
+            }
+        });
+    }
+
+    /// Apply the wall value to the outermost pixel rows and columns.
+    pub(crate) fn apply_bc(&mut self) {
         // repulse from or attract to walls
         if let Some(value) = self.wall_value {
             // top wall

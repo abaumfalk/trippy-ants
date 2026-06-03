@@ -1,6 +1,6 @@
 //! The _backplane_ of the simulation which stores the pheromone levels for each cell in the grid.
 
-use std::slice;
+use std::{mem, slice, sync::atomic::AtomicU32};
 
 use rayon::{
     iter::{IndexedParallelIterator as _, ParallelIterator as _},
@@ -238,17 +238,37 @@ impl Grid {
         &self.cells()[index]
     }
 
-    /// Get the mutable cell at the given x and y coordinates.
+    /// Returns a reference to the cell's level as an `AtomicU32` (bitcast).
     ///
-    /// Out-of-bounds indices will be handled according to the topology.
-    // TODO implement interpolation
-    pub(crate) fn cell_mut(&mut self, x: f32, y: f32) -> &mut Cell {
+    /// # Safety
+    ///
+    /// The caller must ensure that there are no non‑atomic accesses (reads or writes
+    /// via `&f32` or `&mut f32`) to the same memory location for the entire duration
+    /// any `&AtomicU32` returned by this function is live, and that the returned
+    /// reference is not used to introduce a data race.
+    /// (See <https://doc.rust-lang.org/1.96.0/std/sync/atomic/index.html> for details on the atomic memory model).
+    #[expect(
+        unsafe_code,
+        reason = "required to access the cells atomically in some cases but non-atomically in others"
+    )]
+    pub(crate) unsafe fn atomic_cell_level(&self, x: f32, y: f32) -> &AtomicU32 {
         let index = self.index(x, y);
+
         #[expect(
             clippy::indexing_slicing,
             reason = "The `index` method ensures that the index is in bounds"
         )]
-        &mut self.cells_mut()[index]
+        #[expect(
+            clippy::transmute_ptr_to_ptr,
+            unsafe_code,
+            reason = "We cast a f32 as an AtomicU32"
+        )]
+        // Safety:
+        // - We use transmute to turn a &f32 into a &AtomicU32 which is safe, representation wise.
+        // - The caller is responsible for ensuring no concurrent non-atomic access.
+        unsafe {
+            mem::transmute(&self.cells()[index].level)
+        }
     }
 
     /// Evaluates a 3x3 Gaussian filter kernel given three horizontal row segments.
@@ -286,8 +306,7 @@ impl Grid {
             read_buffer.cells().len(),
             "incompatible Grid layout"
         );
-        assert_eq!(self.height, read_buffer.height, "incompatible Grid height");
-        assert_eq!(self.width, read_buffer.width, "incompatible Grid width");
+        assert_eq!(self.height, read_buffer.height, "incompatible Grid shape");
         assert_eq!(self.width % 64, 0, "incompatible Grid width");
 
         assert_eq!(self.cells().len(), width * height, "bad grid layout");
