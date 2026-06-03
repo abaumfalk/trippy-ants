@@ -1,9 +1,6 @@
 //! The part of the simulation which handles the ants that move around the grid and leave pheromones.
 
-use std::{
-    cmp::Ordering,
-    f32::consts::{PI, TAU},
-};
+use std::{cmp::Ordering, f32::consts::PI};
 
 use crate::{
     config::{AgentConfig, Config, WallBounceReaction},
@@ -11,7 +8,49 @@ use crate::{
     simulation::Simulation,
 };
 
+/// Encapsulates a 2D rotation by angle alpha using precomputed cosine and sine values.
+#[derive(Debug, Clone, Copy)]
+struct Rotation2d {
+    /// precomputed cos(alpha).
+    cos: f32,
+
+    /// precomputed sin(alpha).
+    sin: f32,
+}
+
+impl Rotation2d {
+    /// Create a rotation representation from an angle in radians.
+    fn from_radians(radians: f32) -> Self {
+        let (sin, cos) = radians.sin_cos();
+        Self { cos, sin }
+    }
+
+    /// Rotate a 2D vector direction `[x, y]` using matrix multiplication.
+    #[inline]
+    fn rotate_vector(self, vector: [f32; 2]) -> [f32; 2] {
+        let [x, y] = vector;
+        [
+            x.mul_add(self.cos, -(y * self.sin)),
+            x.mul_add(self.sin, y * self.cos),
+        ]
+    }
+}
+
+/// Takes a raw 2D vector offset and returns a normalized unit vector `[dx, dy]`.
+/// If the length is zero or invalid, it gracefully falls back to a default vector.
+#[inline]
+fn normalize_vector(vector: [f32; 2], fallback: [f32; 2]) -> [f32; 2] {
+    let [x, y] = vector;
+    let length = x.hypot(y);
+    if length == 0.0 || length.is_nan() {
+        fallback
+    } else {
+        [x / length, y / length]
+    }
+}
+
 /// Current runtime state of an ant that moves around the grid and leaves pheromones.
+// #[repr(align(64))]
 pub(crate) struct Agent {
     /// The x-coordinate of the agent in pixels.
     pub(crate) x: f32,
@@ -19,10 +58,10 @@ pub(crate) struct Agent {
     /// The y-coordinate of the agent in pixels.
     pub(crate) y: f32,
 
-    /// The direction of the agent in radians.
+    /// The normalized 2D direction vector of the agent.
     ///
-    /// 0.0 faces towards the positive x-axis. Rotation is clockwise.
-    direction: f32,
+    /// [0] faces along the x-axis, [1] faces along the y-axis.
+    direction: [f32; 2],
 
     /// The speed of the agent in pixels per update.
     speed: f32,
@@ -36,6 +75,9 @@ pub(crate) struct Agent {
     /// The width of the sensor cone in radians.
     sensor_width: f32,
 
+    /// Precomputed sniffing positions.
+    sniffing_positions: [SniffingPosition; 4],
+
     /// The distance of the sensor cone in pixels.
     sensor_distance: f32,
 
@@ -47,6 +89,27 @@ pub(crate) struct Agent {
 
     /// What to do, if the agent hits a wall.
     wall_bounce_reaction: WallBounceReaction,
+}
+
+/// Position at which an agent should "sniff",
+/// Consists of a direction and a weight.
+struct SniffingPosition {
+    /// The direction in which to "sniff".
+    direction: Rotation2d,
+
+    /// An arbitrary weight for this "sniffing point".
+    weight: f32,
+}
+
+impl SniffingPosition {
+    /// Precompute the sniffing position from an angle in radians.
+    /// The weight will be the equal to the angle itself.
+    fn from_radians(radians: f32) -> Self {
+        Self {
+            direction: Rotation2d::from_radians(radians),
+            weight: radians,
+        }
+    }
 }
 
 impl Agent {
@@ -83,17 +146,13 @@ impl Agent {
         let radius = height * 0.1 / center_distance;
         let x = (x - width * 0.5) * radius + width * 0.5;
         let y = (y - height * 0.5) * radius + height * 0.5;
-        // let (sin, cos) = (direction + PI).sin_cos();
-        // let x = width as f32 * 0.5 + cos * r;
-        // let y = height as f32 * 0.5 + sin * r;
 
-        // let x = width as f32 * 0.5;
-        // let y = height as f32 * 0.5;
+        // Calculate the raw offset from the center flipped by 180 degrees
+        let dx = (width * 0.5) - x;
+        let dy = (height * 0.5) - y;
 
-        // let direction = random() * TAU;
-        let direction = f32::atan2(y - height * 0.5, x - width * 0.5) - PI * 1.0;
-        let direction = if direction.is_nan() { 0.0 } else { direction };
-        // let direction = PI / 2.0;
+        // Normalize using our new encapsulation helper
+        let direction = normalize_vector([dx, dy], [1.0, 0.0]);
 
         let mut speed_seed = index ^ 0x1234_5678;
         let mut value_seed = index ^ 0x8765_4321;
@@ -105,6 +164,8 @@ impl Agent {
             -1.0
         };
 
+        let sniffing_positions = Self::compute_sniffing_positions(sensor_width);
+
         Self {
             x,
             y,
@@ -113,6 +174,7 @@ impl Agent {
             value: value * sign,
             rng,
             sensor_width,
+            sniffing_positions,
             sensor_distance,
             anti_speed_factor,
             wall_bounce_flip_value,
@@ -127,21 +189,16 @@ impl Agent {
     }
 
     /// Update the position of the agent based on its current direction and speed.
-    ///
-    /// This method will also handle wall collisions and the wall bounce reaction which might affect
-    /// the direction and value.
     fn update_position(&mut self, simulation: &Simulation) {
-        // make anti-ants slower than normal ants
         let scale = if self.value > 0.0 {
             1.0
         } else {
             self.anti_speed_factor
         };
 
-        // move ant into the direction it is facing
-        let (sin, cos) = self.direction.sin_cos();
-        let new_x = cos.mul_add(self.speed * scale, self.x);
-        let new_y = sin.mul_add(self.speed * scale, self.y);
+        let [dx, dy] = self.direction;
+        let new_x = dx.mul_add(self.speed * scale, self.x);
+        let new_y = dy.mul_add(self.speed * scale, self.y);
 
         let (width, height) = (f32::from(simulation.width), f32::from(simulation.height));
 
@@ -210,8 +267,11 @@ impl Agent {
                 };
             }
             WallBounceReaction::FaceAway(spread) => {
-                let mut new_direction =
-                    |normal: f32| normal.mul_add(TAU, rand_symmetric_f32(&mut self.rng) * spread);
+                let mut new_direction = |base_angle: f32| {
+                    let angle = rand_symmetric_f32(&mut self.rng).mul_add(spread, base_angle);
+                    let (sin, cos) = angle.sin_cos();
+                    [cos, sin]
+                };
 
                 match x_rating {
                     Ordering::Less => {
@@ -219,7 +279,7 @@ impl Agent {
                         self.x = 0.0;
                     }
                     Ordering::Greater => {
-                        self.direction = new_direction(0.5);
+                        self.direction = new_direction(PI);
                         self.x = width;
                     }
                     Ordering::Equal => {
@@ -228,11 +288,11 @@ impl Agent {
                 }
                 match y_rating {
                     Ordering::Less => {
-                        self.direction = new_direction(0.25);
+                        self.direction = new_direction(0.5 * PI);
                         self.y = 0.0;
                     }
                     Ordering::Greater => {
-                        self.direction = new_direction(0.75);
+                        self.direction = new_direction(1.5 * PI);
                         self.y = height;
                     }
                     Ordering::Equal => {
@@ -241,71 +301,74 @@ impl Agent {
                 }
             }
             WallBounceReaction::BounceOff => {
-                // FIXME I think these directions are wrong
                 match x_rating {
-                    Ordering::Less => {
-                        self.direction = 0.25_f32.mul_add(TAU, -self.direction);
-                        self.x = 0.0;
+                    Ordering::Less | Ordering::Greater => {
+                        self.direction[0] = -self.direction[0];
+                        self.x = if matches!(x_rating, Ordering::Less) {
+                            0.0
+                        } else {
+                            width
+                        };
                     }
-                    Ordering::Greater => {
-                        self.direction = 0.75_f32.mul_add(TAU, -self.direction);
-                        self.x = width;
-                    }
-                    Ordering::Equal => {
-                        self.x = new_x;
-                    }
+                    Ordering::Equal => self.x = new_x,
                 }
                 match y_rating {
-                    Ordering::Less => {
-                        self.direction = 0.50_f32.mul_add(TAU, -self.direction);
-                        self.y = 0.0;
+                    Ordering::Less | Ordering::Greater => {
+                        self.direction[1] = -self.direction[1];
+                        self.y = if matches!(y_rating, Ordering::Less) {
+                            0.0
+                        } else {
+                            height
+                        };
                     }
-                    Ordering::Greater => {
-                        self.direction = 0.0_f32.mul_add(TAU, -self.direction);
-                        self.y = height;
-                    }
-                    Ordering::Equal => {
-                        self.y = new_y;
-                    }
+                    Ordering::Equal => self.y = new_y,
                 }
+                // Ensure floating-point accuracy remains preserved after mirroring components
+                self.direction = normalize_vector(self.direction, [1.0, 0.0]);
             }
         }
     }
 
     /// Update the direction (orientation) of the agent based on pheromone levels around it.
     fn update_direction(&mut self, simulation: &Simulation) {
-        let sniff = |angle: f32| {
-            let (sin, cos) = angle.sin_cos();
-            simulation
-                .read_buffer
-                .cell(
-                    self.sensor_distance.mul_add(cos, self.x),
-                    self.sensor_distance.mul_add(sin, self.y),
-                )
-                .level
-        };
-
-        #[expect(clippy::neg_multiply, reason = "improves readability")]
-        let sniffs = [
-            self.sensor_width * -1.0,
-            self.sensor_width * -0.5,
-            self.sensor_width * 0.5,
-            self.sensor_width * 1.0,
-        ];
-
         let mut angle_sum = 0.0;
-        for angle in sniffs {
-            angle_sum = sniff(self.direction + angle).mul_add(angle, angle_sum);
+
+        for sniff in &self.sniffing_positions {
+            let [rx, ry] = sniff.direction.rotate_vector(self.direction);
+
+            let x = self.sensor_distance.mul_add(rx, self.x);
+            let y = self.sensor_distance.mul_add(ry, self.y);
+
+            let level = simulation.read_buffer.cell(x, y).level;
+            angle_sum = level.mul_add(sniff.weight, angle_sum);
         }
 
-        let delta = angle_sum;
-        let jitter = rand_symmetric_f32(&mut self.rng) * self.sensor_width;
-        self.direction += jitter.mul_add(0.3, delta * 0.5);
+        // Incorporate steering angle delta and random jitter
+        let total_turn =
+            (rand_symmetric_f32(&mut self.rng) * self.sensor_width).mul_add(0.3, angle_sum * 0.5);
+
+        // Final directional modification matrix
+        let final_rotation = Rotation2d::from_radians(total_turn);
+        let raw_new_direction = final_rotation.rotate_vector(self.direction);
+
+        self.direction = raw_new_direction;
+        // Normalize the final vector to ensure there is no drift
+        // self.direction = normalize_vector(raw_new_direction, self.direction);
+    }
+
+    #[expect(clippy::neg_multiply, reason = "readability")]
+    /// Precompute the sniffing positions for a given sensor width.
+    fn compute_sniffing_positions(sensor_width: f32) -> [SniffingPosition; 4] {
+        // Precompute sensory sampling offsets utilizing Rotation2d matrix structures
+        [
+            SniffingPosition::from_radians(sensor_width * -1.0),
+            SniffingPosition::from_radians(sensor_width * -0.5),
+            SniffingPosition::from_radians(sensor_width * 0.5),
+            SniffingPosition::from_radians(sensor_width * 1.0),
+        ]
     }
 
     /// Update the agent's configuration.
-    ///
-    /// Note: some values cannot be changed at runtime and will be ignored.
     pub(crate) fn update_config(&mut self, config: &AgentConfig, index: u32) {
         let AgentConfig {
             sensor_width,
@@ -318,11 +381,13 @@ impl Agent {
             ref speed,
             anti_percentage: _, // used for creation of new agents
         } = *config;
-        self.sensor_width = sensor_width;
         self.sensor_distance = sensor_distance;
         self.anti_speed_factor = anti_speed_factor;
         self.wall_bounce_flip_value = wall_bounce_flip_value;
         self.wall_bounce_reaction = wall_bounce_reaction;
+
+        self.sensor_width = sensor_width;
+        self.sniffing_positions = Self::compute_sniffing_positions(sensor_width);
 
         let mut speed_seed = index ^ 0x1234_5678;
         self.speed = speed.start + rand_f32(&mut speed_seed) * (speed.end - speed.start);
