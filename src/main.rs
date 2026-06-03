@@ -20,6 +20,8 @@ use chrono::Local;
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use rayon::iter::{IntoParallelRefMutIterator as _, ParallelIterator as _};
 use std::{
+    cmp::Ordering,
+    collections::VecDeque,
     env,
     path::Path,
     process::ExitCode,
@@ -45,11 +47,15 @@ const HEIGHT: u16 = 1080;
 /// This saves on CPU for the actual computation.
 const MAX_FPS: u64 = 30;
 
+/// Maximum Number of TPS (Time Per Simulation-Step) samples to keep around.
+const TPS_HISTORY_MAX: usize = 64_000;
+
 /// Start the application.
 ///
 /// # Panics
 ///
 /// Panics if the window cannot be created.
+#[expect(clippy::too_many_lines, reason = "Function is still understandable")]
 fn main() -> ExitCode {
     // read path to config file from command line
 
@@ -87,9 +93,6 @@ fn main() -> ExitCode {
 
     window.set_target_fps(0); // no sleep between polls — FPS reflects CPU fire + blit cost
 
-    let mut frames_in_window = 0_u32;
-    let mut window_start = Instant::now();
-
     let mut simulation = Simulation::new(WIDTH, HEIGHT, &config.world);
     let mut frame = Frame::new(WIDTH, HEIGHT);
     let mut agents = (0..config.agent.count)
@@ -100,7 +103,11 @@ fn main() -> ExitCode {
         .collect::<Vec<_>>();
 
     let mut frame_timeout = Instant::now();
+    let mut last_sps_calculation = Instant::now();
+    let mut step_durations = VecDeque::with_capacity(TPS_HISTORY_MAX);
+    let mut median_buffer = Vec::with_capacity(TPS_HISTORY_MAX);
     while window.is_open() && !window.is_key_pressed(Key::Escape, KeyRepeat::No) {
+        let step_start = Instant::now();
         simulation.swap_buffers();
         simulation.blur();
 
@@ -127,13 +134,48 @@ fn main() -> ExitCode {
             }
         }
 
-        frames_in_window += 1;
-        let elapsed = window_start.elapsed();
+        if step_durations.len() >= TPS_HISTORY_MAX {
+            _ = step_durations.pop_front();
+        }
+        step_durations.push_back(step_start.elapsed());
+
+        let elapsed = last_sps_calculation.elapsed();
         if elapsed.as_secs_f64() >= 1.0 {
-            let fps = f64::from(frames_in_window) / elapsed.as_secs_f64();
-            println!("{fps:.1} FPS");
-            frames_in_window = 0;
-            window_start += Duration::from_secs(1);
+            median_buffer.clear();
+            median_buffer.extend(
+                step_durations
+                    .iter()
+                    .map(|sample| sample.as_secs_f64() * 1e6),
+            );
+
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a buffer this large would not fit any memory"
+            )]
+            let count = median_buffer.len() as f64;
+            let sum: f64 = median_buffer.iter().sum();
+            let mean = sum / count;
+
+            let variance = median_buffer
+                .iter()
+                .map(|sample| (sample - mean).powi(2))
+                .sum::<f64>()
+                / count;
+            let stddev = variance.sqrt();
+
+            #[expect(clippy::min_ident_chars, reason = "these names are fine")]
+            median_buffer.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Less));
+
+            let i_mid = median_buffer.len() / 2;
+            #[expect(clippy::indexing_slicing, reason = "checked above")]
+            let median = if median_buffer.len() % 2 == 0 {
+                f64::midpoint(median_buffer[i_mid - 1], median_buffer[i_mid])
+            } else {
+                median_buffer[i_mid]
+            };
+
+            println!("Mean: {mean:>6.1} | Median: {median:>6.1} | StdDev: {stddev:>6.1}");
+            last_sps_calculation += Duration::from_secs(1);
         }
 
         if let Some(new_config) = config_watcher.watch_for_update() {
