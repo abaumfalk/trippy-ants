@@ -4,17 +4,29 @@ use rayon::{
     iter::{IndexedParallelIterator as _, ParallelIterator as _},
     slice::ParallelSliceMut as _,
 };
+use std::slice;
 
 use crate::config::GridTopology;
 
 /// Contains the data for a single cell (pixel) in the grid.
 #[derive(Default, Clone, Copy)]
+#[repr(transparent)]
 pub(crate) struct Cell {
     /// The pheromone level of the cell.
     ///
     /// This level is typically between -1.0 and 1.0. Positive values will attract ants, negative
     /// values will repel them.
     pub(crate) level: f32,
+}
+
+#[repr(C, align(64))]
+#[derive(Clone, Copy)]
+/// Cache Line aligned block of cells.
+struct CellBlock([Cell; 16]);
+
+impl CellBlock {
+    /// Number of cells in each `CellBlock`.
+    const NUM_CELLS: usize = size_of::<Self>() / size_of::<Cell>();
 }
 
 /// Data structure holding the cell values for each pixel in the grid.
@@ -26,7 +38,7 @@ pub(crate) struct Grid {
     height: u16,
 
     /// The actual cells/pixels in the grid.
-    pub(crate) cells: Vec<Cell>,
+    blocks: Vec<CellBlock>,
 
     /// The topology of the grid.
     ///
@@ -41,19 +53,51 @@ impl Grid {
     ///
     /// Panics if the width or height is 0 or greater than 32767.
     pub(crate) fn new(width: u16, height: u16, topology: GridTopology) -> Self {
-        assert!(width > 0, "width must be greater than 0");
-        assert!(height > 0, "height must be greater than 0");
-        assert!(width <= 0x7FFF, "width must be less than or equal to 32767");
+        assert!(width > 2, "width must be greater than 2");
+        assert!(height > 2, "height must be greater than 2");
+        assert!(
+            i16::try_from(width).is_ok(),
+            "width must be less than or equal to {}",
+            i16::MAX
+        );
         assert!(
             height <= 0x7FFF,
             "height must be less than or equal to 32767"
         );
 
+        let total_cells = usize::from(width) * usize::from(height);
+        let num_blocks = total_cells / CellBlock::NUM_CELLS;
+        let blocks = vec![CellBlock([Cell::default(); CellBlock::NUM_CELLS]); num_blocks];
+
         Self {
             width,
             height,
-            cells: vec![Cell::default(); usize::from(width) * usize::from(height)],
+            blocks,
             topology,
+        }
+    }
+
+    /// Get a read only view to all cells in the grid.
+    #[expect(unsafe_code, reason = "conversion of &CellBlock to &[Cell; 16]")]
+    pub(crate) fn cells(&self) -> &[Cell] {
+        // Safety: each CellBlock has the same layout as `[Cell; CellBlock::NUM_CELLS]`
+        unsafe {
+            slice::from_raw_parts(
+                self.blocks.as_ptr().cast::<Cell>(),
+                usize::from(self.width) * usize::from(self.height),
+            )
+        }
+    }
+
+    /// Get a mutable view to all cells in the grid.
+    #[expect(unsafe_code, reason = "conversion of &CellBlock to &[Cell; 16]")]
+    pub(crate) fn cells_mut(&mut self) -> &mut [Cell] {
+        // Safety: each CellBlock has the same layout as `[Cell; CellBlock::NUM_CELLS]`
+        unsafe {
+            slice::from_raw_parts_mut(
+                self.blocks.as_mut_ptr().cast::<Cell>(),
+                usize::from(self.width) * usize::from(self.height),
+            )
         }
     }
 
@@ -96,22 +140,49 @@ impl Grid {
     }
 
     /// Get a row of cells from the grid.
+    #[expect(unsafe_code, reason = "conversion of &CellBlock to &[Cell; 16]")]
     pub(crate) fn row(&self, y: impl Into<usize>) -> Option<&[Cell]> {
-        let width = usize::from(self.width);
-        let offset = y.into() * width;
-        self.cells.get(offset..offset + width)
+        let y = y.into();
+        if y >= self.height as usize {
+            return None;
+        }
+        let blocks_per_row = self.width as usize / CellBlock::NUM_CELLS;
+        let start = y * blocks_per_row;
+        let end = start + blocks_per_row;
+        let block_slice = self.blocks.get(start..end)?;
+        // Safety: each CellBlock has the same layout as `[Cell; CellBlock::NUM_CELLS]`
+        unsafe {
+            Some(slice::from_raw_parts(
+                block_slice.as_ptr().cast::<Cell>(),
+                blocks_per_row * CellBlock::NUM_CELLS,
+            ))
+        }
     }
 
     /// Get a mutable row of cells from the grid.
+    #[expect(unsafe_code, reason = "conversion of &CellBlock to &[Cell; 16]")]
     pub(crate) fn row_mut(&mut self, y: impl Into<usize>) -> Option<&mut [Cell]> {
-        let width = usize::from(self.width);
-        let offset = y.into() * width;
-        self.cells.get_mut(offset..offset + width)
+        let y = y.into();
+        if y >= self.height as usize {
+            return None;
+        }
+        let blocks_per_row = self.width as usize / CellBlock::NUM_CELLS;
+        let start = y * blocks_per_row;
+        let end = start + blocks_per_row;
+        let block_slice = self.blocks.get_mut(start..end)?;
+        // Safety: each CellBlock has the same layout as `[Cell; CellBlock::NUM_CELLS]`
+        unsafe {
+            Some(slice::from_raw_parts_mut(
+                block_slice.as_mut_ptr().cast::<Cell>(),
+                blocks_per_row * CellBlock::NUM_CELLS,
+            ))
+        }
     }
 
     /// Get an iterator over the rows of cells in the grid.
     pub(crate) fn rows_mut(&mut self) -> impl Iterator<Item = &mut [Cell]> {
-        self.cells.chunks_exact_mut(usize::from(self.width))
+        let width = self.width;
+        self.cells_mut().chunks_exact_mut(usize::from(width))
     }
 
     /// Get the first row of cells in the grid as mutable.
@@ -139,7 +210,7 @@ impl Grid {
     /// Out-of-bounds indices will be handled according to the topology.
     ///
     /// The returned index is guaranteed to be within the bounds of the grid.
-    fn index(&self, x: f32, y: f32) -> usize {
+    pub(crate) fn index(&self, x: f32, y: f32) -> usize {
         #[expect(clippy::cast_possible_truncation, reason = "truncation is acceptable")]
         let (x16, y16) = (x.round() as i16, y.round() as i16);
         let (mapped_x, mapped_y) = (self.map_col(x16), self.map_row(y16));
@@ -156,7 +227,7 @@ impl Grid {
             clippy::indexing_slicing,
             reason = "The `index` method ensures that the index is in bounds"
         )]
-        &self.cells[index]
+        &self.cells()[index]
     }
 
     /// Get the mutable cell at the given x and y coordinates.
@@ -169,7 +240,7 @@ impl Grid {
             clippy::indexing_slicing,
             reason = "The `index` method ensures that the index is in bounds"
         )]
-        &mut self.cells[index]
+        &mut self.cells_mut()[index]
     }
 
     /// Update the grid by blurring the pheromone levels of the read buffer.
@@ -181,8 +252,9 @@ impl Grid {
         reason = "unreachable: coordinates are guaranteed to be in bounds"
     )]
     pub(crate) fn blur(&mut self, read_buffer: &Self, decay_factor: f32) {
-        self.cells
-            .par_chunks_exact_mut(usize::from(self.width))
+        let width = usize::from(self.width);
+        self.cells_mut()
+            .par_chunks_exact_mut(width)
             .enumerate()
             .for_each(|(y, write_row)| {
                 // 3 rows around the current row
