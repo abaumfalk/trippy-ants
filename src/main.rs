@@ -114,14 +114,13 @@ fn main() -> ExitCode {
         // limit display framerate
         if frame_timeout.elapsed() >= Duration::from_millis(1000 / MAX_FPS) {
             frame.update(&simulation.write_buffer, &palette);
+            frame.update_window(&mut window);
             frame_timeout = Instant::now();
         }
         agents.par_iter_mut().for_each(|agent| {
             agent.update(&simulation);
         });
         simulation.update(&agents);
-
-        frame.update_window(&mut window);
 
         if window.is_key_pressed(Key::Space, KeyRepeat::No) {
             let filename = format!(
