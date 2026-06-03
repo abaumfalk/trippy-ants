@@ -51,6 +51,11 @@ impl Simulation {
         }
     }
 
+    /// Allocate a scratch grid matching the simulation.
+    pub(crate) fn make_scratch_grid(&self) -> Grid {
+        Grid::new(self.width, self.height, self.read_buffer.topology)
+    }
+
     /// Update the simulation by blurring the pheromone levels of the read buffer and writing them to the write buffer.
     pub(crate) fn blur(&mut self) {
         self.write_buffer.blur(&self.read_buffer, self.decay_factor);

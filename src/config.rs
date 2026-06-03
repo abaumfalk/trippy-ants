@@ -66,7 +66,7 @@ pub(crate) enum GridTopology {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct AgentConfig {
     /// Number of ants.
-    pub(crate) count: usize,
+    pub(crate) count: u32,
 
     /// Minimum and maximum pheromone intensity an ant can leave on the grid.
     #[serde(with = "serde_range_f32")]
