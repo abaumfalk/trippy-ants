@@ -3,66 +3,78 @@
 use std::path::Path;
 
 use image::error::{LimitError, LimitErrorKind};
-use minifb::Window;
-use rayon::{
-    iter::{IndexedParallelIterator as _, ParallelIterator as _},
-    slice::ParallelSliceMut as _,
-};
+use pixels::Pixels;
 
 use crate::{grid::Grid, palette::Palette};
 
 /// Holds the current colorized image representation of the simulation.
-pub(crate) struct Frame {
+pub(crate) struct Frame<'pixels> {
     /// Width of the frame in pixels.
     width: usize,
 
     /// Height of the frame in pixels.
     height: usize,
 
-    /// minifb: 0x00RRGGBB per pixel, row-major.
-    pub(crate) pixels: Vec<u32>,
+    /// The Pixels backend.
+    pixels: Pixels<'pixels>,
 }
 
-impl Frame {
+impl<'pixels> Frame<'pixels> {
     /// Create a new frame with the given width and height in pixels.
-    pub(crate) fn new(width: u16, height: u16) -> Self {
+    ///
+    /// # Panics
+    /// If the pixels instance does not match the specified with and height.
+    pub(crate) fn new(width: u16, height: u16, pixels: Pixels<'pixels>) -> Self {
+        assert_eq!(
+            width as usize * height as usize * 4,
+            pixels.frame().len(),
+            "width and height do not match the pixels instance"
+        );
+
         Self {
             width: usize::from(width),
             height: usize::from(height),
-            pixels: vec![0; usize::from(width) * usize::from(height)],
+            pixels,
         }
     }
 
-    /// Update the frame with the current state of the simulation by colorizing the stored cell-values.
+    /// Update the frame with the current state of the simulation by colorizing the stored cell-values
+    /// and render it to the underlying surface.
     ///
     /// # Panics
-    ///
-    /// Panics if the frame and grid sizes do not match.
+    /// If the frame and grid sizes do not match.
     pub(crate) fn update<const RESOLUTION: usize>(
         &mut self,
         grid: &Grid,
         palette: &Palette<RESOLUTION>,
     ) {
         self.pixels
-            .par_chunks_exact_mut(self.width)
+            .frame_mut()
+            .chunks_exact_mut(4 * self.width)
             .enumerate()
-            .for_each(|(y, pixels)| {
-                let row = grid.row(y).expect("mismatch between frame and grid size");
-                for (pixel, cell) in pixels.iter_mut().zip(row) {
-                    *pixel = palette.get_color(cell.level);
+            .for_each(|(i, pixels)| {
+                for (j, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let level = grid
+                        .cells()
+                        .get(i * self.width + j)
+                        .expect("the size of screen_bytes does not match the grid")
+                        .level;
+
+                    let color = palette.get_color(level);
+
+                    // The palette is packed as 0xAABBGGRR:
+                    // Copy directly to the destination slice in the order expected by pixels: [R, G, B, A]
+                    *pixel = color.to_le_bytes();
                 }
             });
     }
 
-    /// Update the window with the current state of the frame.
+    /// Render the frame contents to the screen.
     ///
-    /// # Panics
-    ///
-    /// Panics if the window's size and the frame's size do not match.
-    pub(crate) fn update_window(&self, window: &mut Window) {
-        window
-            .update_with_buffer(&self.pixels, self.width, self.height)
-            .expect("update");
+    /// # Errors
+    /// If rendering the frame to the underlying surface fails.
+    pub(crate) fn render(&self) -> Result<(), pixels::Error> {
+        self.pixels.render()
     }
 
     /// store the current image as a PNG file.
@@ -71,17 +83,20 @@ impl Frame {
     ///
     /// Returns an error if the PNG file cannot be saved.
     pub(crate) fn save_png(&self, path: &Path) -> Result<(), image::ImageError> {
-        let rgb = self
-            .pixels
+        let rgba_frame = self.pixels.frame();
+
+        // Directly pull R, G, B channels from the ordered layout
+        let rgb = rgba_frame
+            .as_chunks::<4>()
+            .0
             .iter()
-            .flat_map(|rgb| {
-                let [blue, green, red, _] = rgb.to_le_bytes();
-                [red, green, blue]
-            })
+            .flat_map(|&[red, green, blue, _alpha]| [red, green, blue])
             .collect::<Vec<_>>();
+
         let dimension_error = |_error| {
             image::ImageError::Limits(LimitError::from_kind(LimitErrorKind::DimensionError))
         };
+
         image::save_buffer(
             path,
             &rgb,

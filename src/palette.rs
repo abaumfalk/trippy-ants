@@ -87,13 +87,14 @@ impl<const RESOLUTION: usize> Palette<RESOLUTION> {
                 reason = "clamped value will be in range"
             )]
             #[expect(clippy::cast_sign_loss, reason = "clamped value cannot be negative")]
-            let map_range = |value: f32| (value * 256.0).round_ties_even().clamp(0.0, 255.0) as u32;
+            let map_range = |value: f32| (value * 256.0).round_ties_even().clamp(0.0, 255.0) as u8;
             let red = map_range(red);
             let green = map_range(green);
             let blue = map_range(blue);
+            let alpha = 0xff;
 
-            // combine colors into a single u32 (0x00RRGGBB)
-            *color = (red << 16) | (green << 8) | blue;
+            // combine colors into a single u32 (0xAABBGGRR)
+            *color = u32::from_le_bytes([red, green, blue, alpha]);
         }
         result
     }

@@ -16,9 +16,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # required to save the screenshots as PNG files
 image = { version = "0.25", default-features = false, features = ["png"] }
-
-# required to create the window and display the simulation
-minifb = "0.28"
+pixels = "0.17.1"
 
 # required to parallelize the simulation (performance)
 rayon = { version = "1.0", default-features = false }
@@ -28,6 +26,7 @@ serde = { version = "1.0", default-features = false, features = ["derive"] }
 
 # used to parse the configuration file
 toml = { version = "1" }
+winit = "0.30.13"
 
 [lints.rust]
 absolute_paths_not_starting_with_crate = "warn"
