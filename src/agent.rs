@@ -295,12 +295,12 @@ impl Agent {
 
         let mut angle_sum = 0.0;
         for angle in sniffs {
-            angle_sum += sniff(self.direction + angle) * angle;
+            angle_sum = sniff(self.direction + angle).mul_add(angle, angle_sum);
         }
 
         let delta = angle_sum;
         let jitter = rand_symmetric_f32(&mut self.rng) * self.sensor_width;
-        self.direction += delta * 0.5 + jitter * 0.3;
+        self.direction += jitter.mul_add(0.3, delta * 0.5);
     }
 
     /// Update the agent's configuration.
