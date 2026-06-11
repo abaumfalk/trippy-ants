@@ -37,12 +37,13 @@ for threads in $(seq 1 "$MAX_THREADS"); do
     mean=$(echo "$stats_line" | awk -F '|' '{print $1}' | sed 's/Mean://g' | xargs)
     median=$(echo "$stats_line" | awk -F '|' '{print $2}' | sed 's/Median://g' | xargs)
     stddev=$(echo "$stats_line" | awk -F '|' '{print $3}' | sed 's/StdDev://g' | xargs)
+    median_fps=$(awk "BEGIN {print 1e6 / $median}")
 
     if [ -z "$median" ]; then
         echo "FAILED"
     else
         # Appended the core_list to the terminal output so you can verify the pinning
-        echo "Mean: $mean, Median: $median, StdDev: $stddev (Cores: $core_list)"
+        echo "Mean: $mean, Median: $median, StdDev: $stddev, Median FPS: $median_fps (Cores: $core_list)"
         echo "$threads,$mean,$median,$stddev" >> results.csv
     fi
 done

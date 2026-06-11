@@ -174,7 +174,8 @@ fn main() -> ExitCode {
                 median_buffer[i_mid]
             };
 
-            println!("Mean: {mean:>6.1} | Median: {median:>6.1} | StdDev: {stddev:>6.1}");
+            let median_fps = 1e6 / median;
+            println!("Mean: {mean:>6.1} | Median: {median:>6.1} | StdDev: {stddev:>6.1} | Median FPS: {median_fps:6.1}");
             last_sps_calculation += Duration::from_secs(1);
         }
 
